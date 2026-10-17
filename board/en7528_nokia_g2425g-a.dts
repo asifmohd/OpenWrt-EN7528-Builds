@@ -1,0 +1,319 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * Nokia G-2425G-A (Airtel XStream Fiber) - RAM-only (initramfs) profile
+ * OpenWrt target: econet / en7528
+ *
+ * Hardware (verified on the live unit, see the project handoff):
+ *   SoC   : EcoNet EN7528, 2x MIPS 1004Kc, 256 MB RAM
+ *   Wi-Fi : MT7603E   on PCIe0 (2.4 GHz) - 14c3:7603
+ *           MT7663    on PCIe1 (5 GHz)  - 14c3:7663 (mt7615 driver)
+ *   NAND  : SPI-NAND, 128 KiB erase blocks, 256 MiB
+ *   USB   : EN7528 xHCI, VBUS = GPIO14 (active high)
+ *
+ * This image is intended to be booted from RAM and must never write flash.
+ * &nand is kept enabled so the per-unit MAC addresses can be read from the
+ * "ri" partition, but it deliberately omits:
+ *
+ *   econet,can-write-factory-bbt   -> the en75_bmt driver then refuses to
+ *                                     write/rebuild the bad-block table
+ *   econet,enable-remap            -> read-time block remapping, i.e. a
+ *                                     flash write on a plain read
+ *
+ * so the BMT driver only ever reads. Partition offsets are confirmed against
+ * this unit's own kernel (handoff Round 14), not a sibling board.
+ *
+ * Known TODOs (handoff Rounds 8/15):
+ *   - The Wi-Fi calibration EEPROM is a per-unit *file* on this board
+ *     (/configs/bin_ac/RT30xxEEPROM.bin), not a raw flash region, so it cannot
+ *     be wired with nvmem-cells and the mt76 radios start on chip defaults.
+ *   - LED / button GPIO map is only partly known (see the nodes below).
+ */
+
+/dts-v1/;
+
+#include "en7528.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "Nokia G-2425G-A";
+	compatible = "nokia,g2425g-a", "econet,en7528";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x10000000>;	/* 256 MB */
+	};
+
+	chosen {
+		stdout-path = "/serial@1fbf0000:115200";
+		linux,usable-memory-range = <0x00020000 0x0ffe0000>;
+	};
+
+	/*
+	 * Only one LED is driven by a plain GPIO on this board
+	 * (/proc/tc3162/led_def: led 42 -> GPIO16). Polarity and the physical
+	 * LED it lights are unverified, so no color/function is asserted and
+	 * 01_leds attaches no trigger.
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led_gpio16: led-16 {
+			gpios = <&pinctrl 16 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	/* USB port power: GPIO14, active high (vendor-confirmed). */
+	reg_usb_vbus: regulator-usb-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpios = <&pinctrl 14 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+	};
+
+	/*
+	 * Button candidates from the vendor's button_driver.ko table
+	 * (handoff Round 15). Which is reset/WPS/WLAN is not known, so this is
+	 * disabled until a physical press test identifies them.
+	 */
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <100>;
+		status = "disabled";
+
+		key-gpio-17 {
+			label = "gpio17";
+			gpios = <&pinctrl 17 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_PROG1>;
+		};
+
+		key-gpio-16 {
+			label = "gpio16";
+			gpios = <&pinctrl 16 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_PROG2>;
+		};
+
+		key-gpio-11 {
+			label = "gpio11";
+			gpios = <&pinctrl 11 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_PROG3>;
+		};
+
+		key-gpio-18 {
+			label = "gpio18";
+			gpios = <&pinctrl 18 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_PROG4>;
+		};
+	};
+};
+
+/* ------------------------------- PCIe ------------------------------- */
+
+&pcie0 {
+	status = "okay";
+};
+
+&pcie1 {
+	status = "okay";
+};
+
+/*
+ * 2.4 GHz radio. MAC = ri[0x3e] + 9, matching the vendor ra0
+ * (18:45:93:71:cd:09). Calibration EEPROM is a UBIFS file, see TODO above.
+ */
+&slot0 {
+	status = "okay";
+
+	wifi@0,0 {
+		compatible = "mediatek,mt76";
+		reg = <0x0000 0 0 0 0>;
+		nvmem-cells = <&macaddr_ri 9>;
+		nvmem-cell-names = "mac-address";
+		ieee80211-freq-limit = <2400000 2500000>;
+	};
+};
+
+/*
+ * 5 GHz radio (MT7663/MT7613, mt7615 driver). MAC = ri[0x3e] + 13,
+ * matching the vendor rai0 (18:45:93:71:cd:0d).
+ */
+&slot1 {
+	status = "okay";
+
+	wifi@0,0 {
+		compatible = "mediatek,mt76";
+		reg = <0x0000 0 0 0 0>;
+		nvmem-cells = <&macaddr_ri 13>;
+		nvmem-cell-names = "mac-address";
+		ieee80211-freq-limit = <5000000 6000000>;
+	};
+};
+
+/* ----------------------------- Ethernet ----------------------------- */
+
+&gmac0 {
+	status = "okay";
+	nvmem-cells = <&macaddr_ri 0>;
+	nvmem-cell-names = "mac-address";
+};
+
+/*
+ * The EN7528 switch has no DSA support upstream yet; the four LAN sockets are
+ * plain switch ports. Port -> socket numbering is taken from the DASAN/Jio
+ * convention (port 1 = LAN1) and is not independently verified on this board.
+ */
+&switch {
+	status = "okay";
+};
+
+&gsw_port1 {
+	label = "lan1";
+	status = "okay";
+};
+
+&gsw_port2 {
+	label = "lan2";
+	status = "okay";
+};
+
+&gsw_port3 {
+	label = "lan3";
+	status = "okay";
+};
+
+&gsw_port4 {
+	label = "lan4";
+	status = "okay";
+};
+
+/* ------------------------------ USB --------------------------------- */
+
+&usb {
+	status = "okay";
+	vbus-supply = <&reg_usb_vbus>;
+};
+
+/* ------------------------------ Flash ------------------------------- */
+/*
+ * READ-ONLY configuration. Do NOT add econet,can-write-factory-bbt or
+ * econet,enable-remap: both can cause flash writes during normal operation.
+ *
+ * Layout confirmed in handoff Round 14 from this unit's own kernel partition
+ * table (every region after "bootloader" is MTDPART_OFS_APPEND, so offsets are
+ * the cumulative sum of the sizes). ubi0=config, ubi1=log, ubi2=data(/flash).
+ */
+&nand {
+	status = "okay";
+	econet,bmt;
+	econet,bbt-table-size = <250>;
+
+	partitions: partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x0 0x40000>;
+			read-only;
+		};
+
+		partition@40000 {
+			label = "romfile";
+			reg = <0x40000 0x40000>;
+		};
+
+		/* image slot A (vendor version 3FE49362IJHK03) */
+		partition@80000 {
+			label = "image0";
+			reg = <0x80000 0x2200000>;
+		};
+
+		/* image slot B, currently active (3FE49362IJHK33) */
+		partition@2280000 {
+			label = "linux";
+			reg = <0x2280000 0x2200000>;
+		};
+
+		/* derived by the vendor kernel from the active image header */
+		partition@265efb8 {
+			label = "rootfs";
+			reg = <0x265efb8 0x1e21048>;
+		};
+
+		/* offline/factory recovery image (3FE49107AGDA19) */
+		partition@4480000 {
+			label = "image_oflt";
+			reg = <0x4480000 0xf00000>;
+		};
+
+		partition@5380000 {
+			label = "config";
+			reg = <0x5380000 0x800000>;
+		};
+
+		partition@5b80000 {
+			label = "log";
+			reg = <0x5b80000 0xc00000>;
+		};
+
+		partition@6780000 {
+			label = "extfs";
+			reg = <0x6780000 0x600000>;
+		};
+
+		partition@6d80000 {
+			label = "bosa";
+			reg = <0x6d80000 0x40000>;
+		};
+
+		partition@6dc0000 {
+			label = "flag";
+			reg = <0x6dc0000 0x40000>;
+		};
+
+		partition@6e00000 {
+			label = "flagback";
+			reg = <0x6e00000 0x40000>;
+		};
+
+		partition@6e40000 {
+			label = "ri";
+			reg = <0x6e40000 0x40000>;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				/*
+				 * Base MAC at ri[0x3e]. Observed interface MACs:
+				 *   +0   eth0/br0
+				 *   +9   ra0  (2.4 GHz)
+				 *   +13  rai0 (5 GHz)
+				 */
+				macaddr_ri: macaddr@3e {
+					compatible = "mac-base";
+					reg = <0x3e 0x6>;
+					#nvmem-cell-cells = <1>;
+				};
+			};
+		};
+
+		partition@6e80000 {
+			label = "riback";
+			reg = <0x6e80000 0x40000>;
+		};
+
+		/* UBI (mtd14 -> ubi2, mounted at /flash by the vendor firmware) */
+		partition@6ec0000 {
+			label = "data";
+			reg = <0x6ec0000 0x6e00000>;
+		};
+	};
+};

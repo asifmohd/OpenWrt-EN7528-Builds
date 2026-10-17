@@ -2,54 +2,52 @@ name: Build and Release
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]  # This will trigger on tags starting with 'v'
+    branches: [ main, nokia-g2425g-a ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Make build.sh executable
-      run: chmod +x ./build.sh
+      - name: Show free disk space
+        run: df -h /
 
-    - name: Run build script
-      run: ./build.sh
+      - name: Run build script
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
 
-    - name: Check if output files exist
-      id: check_files
-      run: |
-        FILES=(
-          "./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-dasan_h660gm-a-squashfs-tclinux.trx"
-          "./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-en7528_generic-initramfs-kernel.bin"
-        )
-        ALL_EXIST=true
-        for FILE in "${FILES[@]}"; do
-          if [ -f "$FILE" ]; then
-            echo "$FILE exists"
-          else
-            echo "$FILE does not exist"
-            ALL_EXIST=false
-          fi
-        done
-        if [ "$ALL_EXIST" = "true" ]; then
-          echo "All files exist"
-          echo "files_exist=true" >> $GITHUB_OUTPUT
-        else
-          echo "One or more files missing"
-          echo "files_exist=false" >> $GITHUB_OUTPUT
-          exit 1
-        fi
+      - name: Check if output files exist
+        id: check_files
+        run: |
+          DIR=./openwrt/bin/targets/econet/en7528
+          NOKIA="$DIR/openwrt-econet-en7528-nokia_g2425g-a-initramfs-kernel.bin"
+          ls -l "$DIR"
+          test -f "$NOKIA" || { echo "$NOKIA does not exist"; exit 1; }
+          echo "files_exist=true" >> "$GITHUB_OUTPUT"
 
-    - name: Create Release and Upload Assets
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && steps.check_files.outputs.files_exist == 'true'
-      uses: softprops/action-gh-release@v2
-      with:
-        files: |
-          ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-dasan_h660gm-a-squashfs-tclinux.trx
-          ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-en7528_generic-initramfs-kernel.bin
-      env:
-        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      - name: Upload build artifacts
+        if: steps.check_files.outputs.files_exist == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-en7528-nokia-g2425g-a
+          path: openwrt/bin/targets/econet/en7528/*
+          if-no-files-found: error
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v') && steps.check_files.outputs.files_exist == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-nokia_g2425g-a-initramfs-kernel.bin
+            ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-en7528_generic-initramfs-kernel.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
