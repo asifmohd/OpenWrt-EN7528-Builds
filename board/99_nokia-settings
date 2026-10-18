@@ -1,0 +1,57 @@
+#!/bin/sh
+#
+# Nokia G-2425G-A: post-config defaults that /etc/board.json cannot express.
+#
+# Installed as /etc/uci-defaults/99_nokia-settings by build.sh.  uci-defaults
+# run from /etc/init.d/boot, i.e. after /bin/config_generate has written
+# /etc/config/{network,system} and before network/wifi come up, so editing
+# /etc/config/dhcp and /etc/config/wireless here takes effect on the first boot.
+#
+. /lib/functions.sh
+
+[ "$(board_name)" = "nokia,g2425g-a" ] || exit 0
+
+#
+# LAN address check.
+#
+# 03_nokia-board puts ipaddr/netmask in /etc/board.json and config_generate
+# turns that into network.lan.ipaddr.  Verify it actually arrived (a silent
+# mismatch here would leave the box on 192.168.1.1 and the DHCP pool below
+# pointing at the wrong subnet) and fix it up if it did not.
+#
+if [ "$(uci -q get network.lan.ipaddr)" != "192.168.100.1/24" ]; then
+	echo 'nokia: network.lan.ipaddr was not applied from board.json, setting it here'
+	uci -q set network.lan.ipaddr='192.168.100.1/24'
+	uci -q delete network.lan.netmask
+	uci -q commit network
+fi
+
+#
+# DHCP pool for the 192.168.100.0/24 LAN, i.e. 192.168.100.100-249.
+# dnsmasq's shipped /etc/config/dhcp already uses start=100/limit=150, which
+# would land there by itself; set it explicitly so the pool does not depend on
+# that package default changing.
+#
+uci -q set dhcp.lan.start='100'
+uci -q set dhcp.lan.limit='150'
+uci -q commit dhcp
+
+#
+# Enable the default AP on every radio.
+#
+# Upstream's wifi config generator always writes the "default_radioN" wifi-iface
+# with disabled='1' (and, for bands other than 2.4 GHz, the whole default only
+# exists once a regulatory country is known - 03_nokia-board sets that).  For a
+# RAM test box the point is to have Wi-Fi usable straight after boot, so flip
+# them on.  That is an OPEN network named "OpenWrt": set a key here, or leave
+# the upstream default, if that is not wanted.
+#
+[ -f /etc/config/wireless ] || /sbin/wifi config
+
+for s in $(uci -q show wireless |
+	sed -n 's/^wireless\.\(default_radio[0-9]*\)=wifi-iface$/\1/p'); do
+	uci -q set "wireless.$s.disabled='0'"
+done
+uci -q commit wireless
+
+exit 0

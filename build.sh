@@ -41,6 +41,12 @@ cat ../board/nokia_g2425g-a.mk >> target/linux/econet/image/en7528.mk
 cp ../board/03_nokia-board target/linux/econet/base-files/etc/board.d/
 chmod 0755 target/linux/econet/base-files/etc/board.d/03_nokia-board
 
+# Post-config defaults (DHCP pool for the 192.168.100.0/24 LAN, enable the
+# default APs).  uci-defaults run from /etc/init.d/boot, after config_generate.
+mkdir -p package/base-files/files/etc/uci-defaults
+cp ../board/99_nokia-settings package/base-files/files/etc/uci-defaults/
+chmod 0755 package/base-files/files/etc/uci-defaults/99_nokia-settings
+
 echo ">>> Putting $DEVICE on the switch ports (DSA) instead of eth0"
 # The target's 02_network only lists the DASAN/JioFiber boards in the branch that
 # bridges the switch user ports (lan1..lan4); every other board gets

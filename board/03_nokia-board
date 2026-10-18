@@ -26,6 +26,17 @@ if [ "$(board_name)" = "nokia,g2425g-a" ]; then
 	ucidef_set_country "IN"
 
 	#
+	# LAN address.
+	#
+	# This is an ONT that shipped as 192.168.100.1 (the vendor's /configs/br0_ip_addr),
+	# and its sticker/DHCP expectations are built around that, so keep the stock LAN
+	# subnet instead of the target default 192.168.1.1.  Only board.json keys are
+	# added here; config_generate turns them into network.lan.ipaddr='192.168.100.1/24'.
+	# The DHCP pool is adjusted to match in 99_nokia-settings.
+	#
+	ucidef_set_interface "lan" ipaddr "192.168.100.1" netmask "255.255.255.0"
+
+	#
 	# LAN socket LEDs.
 	#
 	# The four RJ45 LEDs hang off the MT7530/EN7528 GPHY LED blocks, not GPIOs.
