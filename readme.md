@@ -29,6 +29,17 @@ read from the `ri` partition, and it deliberately omits
 `en75_bmt` driver refuses to write the bad-block table, so NAND handling is
 strictly read-only.
 
+On top of that, **all 15 partitions in `&nand` are marked `read-only`**, so even a
+stray `mtd write` / `flashcp` from an interactive shell is refused at the MTD
+layer (`ofpart` turns the property into `mask_flags |= MTD_WRITEABLE`, clearing
+the write permission). With the whole flash read-only, a power cycle is always a
+clean return to stock.
+
+`rootfs` intentionally does **not** carry `linux,rootfs`: `add_mtd_device()`
+(`drivers/mtd/mtdcore.c`) reads that property and sets the kernel's `ROOT_DEV` to
+the partition, i.e. "mount and boot user space from" it - the opposite of what
+this RAM-only profile wants.
+
 ### Booting it from RAM
 
 The EN7528 bootloader has a command menu (`Press any key in 3 secs to enter boot

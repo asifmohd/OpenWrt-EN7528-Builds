@@ -22,6 +22,19 @@
  * so the BMT driver only ever reads. Partition offsets are confirmed against
  * this unit's own kernel (handoff Round 14), not a sibling board.
  *
+ * As defence in depth every partition is ALSO marked read-only, so even a stray
+ * "mtd write" / "flashcp" from an interactive shell is refused at the MTD layer
+ * (ofpart turns "read-only" into mask_flags |= MTD_WRITEABLE, which clears the
+ * write permission). That keeps the whole flash - bootloader, both A/B image
+ * slots, and the vendor "config"/"data" UBIFS - byte identical across a power
+ * cycle. Drop the flags only for a planned flash install.
+ *
+ * "rootfs" deliberately does NOT carry "linux,rootfs". add_mtd_device()
+ * (drivers/mtd/mtdcore.c) reads that property and sets the kernel's global
+ * ROOT_DEV to the partition, i.e. "mount and boot user space from" it, which is
+ * the opposite of what a RAM-only boot wants. Add it, together with a cmdline
+ * "root=", only if this board is ever installed to flash.
+ *
  * Known TODOs (handoff Rounds 8/15):
  *   - The Wi-Fi calibration EEPROM is a per-unit *file* on this board
  *     (/configs/bin_ac/RT30xxEEPROM.bin), not a raw flash region, so it cannot
@@ -206,6 +219,13 @@
  * Layout confirmed in handoff Round 14 from this unit's own kernel partition
  * table (every region after "bootloader" is MTDPART_OFS_APPEND, so offsets are
  * the cumulative sum of the sizes). ubi0=config, ubi1=log, ubi2=data(/flash).
+ *
+ * Every partition below is read-only, which makes the "never write flash" rule
+ * structural rather than a matter of discipline. This also matches what the
+ * vendor kernel does anyway - its boot log prints
+ *   mtd: partition "rootfs" doesn't start on an erase/write block boundary
+ *   -- force read-only
+ * because "rootfs" sits at linux+0x3defb8 and is not erase-block aligned.
  */
 &nand {
 	status = "okay";
@@ -226,65 +246,82 @@
 		partition@40000 {
 			label = "romfile";
 			reg = <0x40000 0x40000>;
+			read-only;
 		};
 
 		/* image slot A (vendor version 3FE49362IJHK03) */
 		partition@80000 {
 			label = "image0";
 			reg = <0x80000 0x2200000>;
+			read-only;
 		};
 
 		/* image slot B, currently active (3FE49362IJHK33) */
 		partition@2280000 {
 			label = "linux";
 			reg = <0x2280000 0x2200000>;
+			read-only;
 		};
 
-		/* derived by the vendor kernel from the active image header */
+		/*
+		 * Derived by the vendor kernel from the active image header and
+		 * nested inside "linux", so the two overlap by design. read-only
+		 * because the vendor kernel forces that anyway (it is not on an
+		 * erase-block boundary); no "linux,rootfs" - see the header note.
+		 */
 		partition@265efb8 {
 			label = "rootfs";
 			reg = <0x265efb8 0x1e21048>;
+			read-only;
 		};
 
 		/* offline/factory recovery image (3FE49107AGDA19) */
 		partition@4480000 {
 			label = "image_oflt";
 			reg = <0x4480000 0xf00000>;
+			read-only;
 		};
 
 		partition@5380000 {
 			label = "config";
 			reg = <0x5380000 0x800000>;
+			read-only;
 		};
 
 		partition@5b80000 {
 			label = "log";
 			reg = <0x5b80000 0xc00000>;
+			read-only;
 		};
 
 		partition@6780000 {
 			label = "extfs";
 			reg = <0x6780000 0x600000>;
+			read-only;
 		};
 
 		partition@6d80000 {
 			label = "bosa";
 			reg = <0x6d80000 0x40000>;
+			read-only;
 		};
 
 		partition@6dc0000 {
 			label = "flag";
 			reg = <0x6dc0000 0x40000>;
+			read-only;
 		};
 
 		partition@6e00000 {
 			label = "flagback";
 			reg = <0x6e00000 0x40000>;
+			read-only;
 		};
 
 		partition@6e40000 {
 			label = "ri";
 			reg = <0x6e40000 0x40000>;
+			read-only;
 
 			nvmem-layout {
 				compatible = "fixed-layout";
@@ -308,12 +345,14 @@
 		partition@6e80000 {
 			label = "riback";
 			reg = <0x6e80000 0x40000>;
+			read-only;
 		};
 
 		/* UBI (mtd14 -> ubi2, mounted at /flash by the vendor firmware) */
 		partition@6ec0000 {
 			label = "data";
 			reg = <0x6ec0000 0x6e00000>;
+			read-only;
 		};
 	};
 };
