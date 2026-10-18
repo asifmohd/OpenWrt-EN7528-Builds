@@ -97,6 +97,13 @@ CONFIG_PACKAGE_kmod-cfg80211=y
 CONFIG_PACKAGE_kmod-mac80211=y
 CONFIG_PACKAGE_wpad-basic-mbedtls=y
 CONFIG_PACKAGE_iperf3=y
+# kexec: reload the next kernel into RAM from the running (RAM-booted) OpenWrt
+# over Ethernet, instead of re-XMODEMing it over the 115200 console (~15 min).
+# The `kexec` package depends on @KERNEL_KEXEC, so both must be on.
+# See ../../KEXEC_PLAN.md (in the parent repo) for why this is the fast path and
+# for the device-tree handoff that still has to be settled.
+CONFIG_KERNEL_KEXEC=y
+CONFIG_PACKAGE_kexec=y
 EOF
 
 echo ">>> make defconfig"
@@ -115,6 +122,15 @@ if grep -q '^CONFIG_CCACHE=y' .config; then
 else
 	echo "    WARNING: CONFIG_CCACHE was dropped by defconfig; ccache will not be used."
 fi
+
+echo ">>> Sanity check: is kexec enabled (fast in-RAM reload)?"
+for sym in CONFIG_KERNEL_KEXEC CONFIG_PACKAGE_kexec; do
+	if grep -q "^${sym}=y" .config; then
+		echo "    ${sym}=y"
+	else
+		echo "    WARNING: ${sym} is not set - kexec reload will be unavailable."
+	fi
+done
 
 echo ">>> make -j$(nproc)  (first build takes roughly an hour)"
 make -j"$(nproc)" || make -j1 V=s
