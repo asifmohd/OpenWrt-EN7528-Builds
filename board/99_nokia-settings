@@ -37,19 +37,26 @@ uci -q set dhcp.lan.limit='150'
 uci -q commit dhcp
 
 #
-# Enable the default AP on every radio.
+# Enable the default AP on every radio, and give the 5 GHz one its own SSID.
 #
 # Upstream's wifi config generator always writes the "default_radioN" wifi-iface
 # with disabled='1' (and, for bands other than 2.4 GHz, the whole default only
 # exists once a regulatory country is known - 03_nokia-board sets that).  For a
 # RAM test box the point is to have Wi-Fi usable straight after boot, so flip
-# them on.  That is an OPEN network named "OpenWrt": set a key here, or leave
-# the upstream default, if that is not wanted.
+# them on.  These are OPEN networks: set a key here, or leave the upstream
+# default, if that is not wanted.
+#
+# Both radios would otherwise be called "OpenWrt", which makes it impossible to
+# tell from a client which band it associated with; suffix the 5 GHz one.
 #
 [ -f /etc/config/wireless ] || /sbin/wifi config
 
 for s in $(uci -q show wireless |
-	sed -n 's/^wireless\.\(default_radio[0-9]*\)=wifi-iface$/\1/p'); do
+	sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
+	radio=$(uci -q get "wireless.$s.device")
+	[ -n "$radio" ] || continue
+	[ "$(uci -q get "wireless.$radio.band")" = "5g" ] &&
+		uci -q set "wireless.$s.ssid='OpenWrt_5G'"
 	uci -q set "wireless.$s.disabled='0'"
 done
 uci -q commit wireless
