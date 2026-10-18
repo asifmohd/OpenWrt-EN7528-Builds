@@ -35,11 +35,13 @@
  * the opposite of what a RAM-only boot wants. Add it, together with a cmdline
  * "root=", only if this board is ever installed to flash.
  *
- * Known TODOs (handoff Rounds 8/15):
- *   - The Wi-Fi calibration EEPROM is a per-unit *file* on this board
- *     (/configs/bin_ac/RT30xxEEPROM.bin), not a raw flash region, so it cannot
- *     be wired with nvmem-cells and the mt76 radios start on chip defaults.
- *   - LED / button GPIO map is only partly known (see the nodes below).
+ * Known TODOs (handoff Rounds 15/20):
+ *   - 5 GHz calibration is embedded as "mediatek,eeprom-data" on &slot1 (see the
+ *     note there). The 2.4 GHz MT7603 needs none: it already reports a full
+ *     20 dBm txpower from its own OTP/efuse (measured live).
+ *   - LED / button GPIO map is only partly known: the LAN socket LEDs are now
+ *     wired through the switch PHY pinctrl (see &pinctrl below), the single
+ *     GPIO LED and the button candidates are still unverified.
  */
 
 /dts-v1/;
@@ -154,6 +156,30 @@
 /*
  * 5 GHz radio (MT7663/MT7613, mt7615 driver). MAC = ri[0x3e] + 13,
  * matching the vendor rai0 (18:45:93:71:cd:0d).
+ *
+ * CALIBRATION (handoff Round 20).
+ * Without a calibration source the mt7615 driver runs on chip defaults and
+ * reports a flat 3 dBm limit on every 5 GHz channel (measured live), i.e. the
+ * radio works but at ~2 mW. The calibration bitstream is a *file* on this
+ * board (/configs/bin_ac/RT30xxEEPROM.bin, 1536 bytes), not a raw flash region,
+ * so "mediatek,mtd-eeprom" is not usable. mt76 also understands
+ * "mediatek,eeprom-data" (raw bytes in the DT), which is what we use: the file
+ * is embedded verbatim at build time.
+ *
+ * Why this file is the right one, and is safe to embed:
+ *   - size 1536 == MT7663_EEPROM_SIZE (mt7615/mt7615.h)
+ *   - offset 0x00 holds the chip id 0x7663, which is exactly what
+ *     mt7615_check_eeprom() accepts (0x7615 / 0x7622 / 0x7663)
+ *   - offset 0x04 holds the MAC (00:0c:43:26:60:00 - a MediaTek OUI, not this
+ *     unit's MAC), and MT_EE_MAC_ADDR == 0x004
+ *   - offset 0x0c holds 0x14c3 (MediaTek PCI vendor id)
+ * mt76_get_of_eeprom_data() only requires size <= the buffer it asks for
+ * (MT7615_EEPROM_FULL_SIZE), so a 1536-byte property is accepted.
+ * The interface MACs still come from nvmem-cells above: mt76_eeprom_override()
+ * prefers the DT mac-address over whatever the EEPROM contains.
+ *
+ * Source file: board/nokia-mt7663-eeprom.bin (md5 3086e97e75a3c8d7248499543e4a374b),
+ * extracted read-only from this unit's config UBIFS (mtd6 /configs).
  */
 &slot1 {
 	status = "okay";
@@ -164,6 +190,7 @@
 		nvmem-cells = <&macaddr_ri 13>;
 		nvmem-cell-names = "mac-address";
 		ieee80211-freq-limit = <5000000 6000000>;
+		mediatek,eeprom-data = /incbin/("nokia-mt7663-eeprom.bin");
 	};
 };
 
@@ -202,6 +229,77 @@
 &gsw_port4 {
 	label = "lan4";
 	status = "okay";
+};
+
+/*
+ * LAN socket LEDs.
+ *
+ * The four RJ45 LEDs are switch-PHY LEDs (gsw_phyN_ledM in en7528.dtsi), not
+ * GPIOs, and the vendor drives them from the MT7530 GPHY LED outputs. The
+ * switch driver asks each PHY for its "gbe-led" pinctrl state; when that state
+ * is missing it logs
+ *   mdio_bus mt7530-0: Failed to setup PHY LED pinctrl
+ * once per PHY and leaves the pins undriven - which is why all four LAN LEDs
+ * sat lit (active low, floating) before this block existed (observed live,
+ * handoff Round 20).
+ *
+ * The groups/functions below are SoC-defined (pinctrl-en7528: phyN_led1 ->
+ * gpio 37/35/33/31), so they are the same on this SoC as on the DASAN
+ * H660GM-A, whose board file is the reference we mirror here.
+ *
+ * NOT yet verified on this unit: which socket is which GPHY (LAN1..LAN4 are
+ * assumed to follow the PHY addresses 9..12 / gsw_phy1..4) and whether the
+ * fitted LEDs are the "led1" outputs. Adjust the pinctrl-0 target or the
+ * 01_leds mapping in the build after a visual check.
+ */
+&pinctrl {
+	gswp1_led1_pins: gswp1-led1-pins {
+		mux {
+			function = "phy1_led1";
+			groups = "gpio37";
+		};
+	};
+
+	gswp2_led1_pins: gswp2-led1-pins {
+		mux {
+			function = "phy2_led1";
+			groups = "gpio35";
+		};
+	};
+
+	gswp3_led1_pins: gswp3-led1-pins {
+		mux {
+			function = "phy3_led1";
+			groups = "gpio33";
+		};
+	};
+
+	gswp4_led1_pins: gswp4-led1-pins {
+		mux {
+			function = "phy4_led1";
+			groups = "gpio31";
+		};
+	};
+};
+
+&gsw_phy1 {
+	pinctrl-names = "gbe-led";
+	pinctrl-0 = <&gswp1_led1_pins>;
+};
+
+&gsw_phy2 {
+	pinctrl-names = "gbe-led";
+	pinctrl-0 = <&gswp2_led1_pins>;
+};
+
+&gsw_phy3 {
+	pinctrl-names = "gbe-led";
+	pinctrl-0 = <&gswp3_led1_pins>;
+};
+
+&gsw_phy4 {
+	pinctrl-names = "gbe-led";
+	pinctrl-0 = <&gswp4_led1_pins>;
 };
 
 /* ------------------------------ USB --------------------------------- */

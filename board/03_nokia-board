@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# Nokia G-2425G-A board defaults.
+#
+# Installed as /etc/board.d/03_nokia-board by build.sh, so it runs at boot with
+# the same mechanism as the target's 01_leds / 02_network.  It is deliberately
+# additive: it never redefines an interface (that is what the 02_network patch
+# in build.sh is for), it only contributes board.json keys.
+#
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+if [ "$(board_name)" = "nokia,g2425g-a" ]; then
+	#
+	# Regulatory domain.
+	#
+	# The wireless config generator disables every non-2.4 GHz radio when it has
+	# no country for the board:
+	#     /lib/wifi/mac80211.uc:  if (!country && band_name != '2g')
+	#                                 defaults = null;   ->  disabled='1'
+	# which is why the 5 GHz AP is missing on a fresh boot.  This is an Airtel
+	# (India) unit, so IN.  Change it here if the router is used elsewhere.
+	#
+	ucidef_set_country "IN"
+
+	#
+	# LAN socket LEDs.
+	#
+	# The four RJ45 LEDs hang off the MT7530 GPHY LED outputs (gsw_phyN_led1),
+	# not GPIOs, so they show up as mt7530-0:<phy>:green:lan-N.  The PHY
+	# addresses 9..12 belong to lan1..lan4 - dmesg on this unit prints
+	# "lan1 (uninitialized): PHY [mt7530-0:09]" and so on.
+	#
+	# The pinctrl that actually drives these pins lives in the DTS ("gbe-led"
+	# state per &gsw_phyN); this only attaches the netdev trigger.
+	#
+	idx=9
+	for lan in 1 2 3 4; do
+		phy=$(printf '%02x' "$idx")
+		ucidef_set_led_netdev "lan$lan" "lan$lan" \
+			"mt7530-0:$phy:green:lan-$lan" "lan$lan" "link tx rx"
+		idx=$((idx + 1))
+	done
+fi
+
+board_config_flush
+
+exit 0

@@ -21,7 +21,38 @@ cd openwrt
 
 echo ">>> Adding board support: $DEVICE"
 cp ../board/en7528_nokia_g2425g-a.dts target/linux/econet/dts/
+# 5 GHz calibration, embedded into the DTB via /incbin/ on &slot1.
+# dtc resolves /incbin/ against the DTS directory (-i $(DTS_DIR)), so the
+# blob has to sit next to the .dts.
+cp ../board/nokia-mt7663-eeprom.bin target/linux/econet/dts/
 cat ../board/nokia_g2425g-a.mk >> target/linux/econet/image/en7528.mk
+
+# Board defaults that only add keys to /etc/board.json (regulatory country and
+# the LAN socket LED triggers).  Additive on purpose - see the file header.
+cp ../board/03_nokia-board target/linux/econet/base-files/etc/board.d/
+chmod 0755 target/linux/econet/base-files/etc/board.d/03_nokia-board
+
+echo ">>> Putting $DEVICE on the switch ports (DSA) instead of eth0"
+# The target's 02_network only lists the DASAN/JioFiber boards in the branch that
+# bridges the switch user ports (lan1..lan4); every other board gets
+# ucidef_set_interface_lan "eth0". On this box eth0 is the switch *conduit*, so
+# br-lan ended up with no usable member and DHCP never reached a socket.
+# Patch the board into that branch.  Verified below - a moved anchor fails the
+# build instead of silently shipping a broken network config.
+NET_D="/etc/board.d/02_network"
+NET_D="target/linux/econet/base-files${NET_D}"
+if ! grep -q 'nokia,g2425g-a' "$NET_D"; then
+	awk '{ if ($0 == "\tjiofiber,jcow414)") print "\tnokia,g2425g-a|\\"; print }' \
+		"$NET_D" > "$NET_D.new"
+	mv "$NET_D.new" "$NET_D"
+fi
+if ! grep -q 'nokia,g2425g-a|\\' "$NET_D"; then
+	echo "ERROR: could not patch $NET_D (upstream layout changed?)"
+	sed -n '1,30p' "$NET_D"
+	exit 1
+fi
+echo "--- econet_setup_interfaces now reads:"
+sed -n '/^econet_setup_interfaces/,/^}/p' "$NET_D"
 
 echo ">>> Updating feeds"
 ./scripts/feeds update -a
