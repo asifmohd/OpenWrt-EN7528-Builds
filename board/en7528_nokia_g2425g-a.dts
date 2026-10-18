@@ -235,72 +235,166 @@
  * LAN socket LEDs.
  *
  * The four RJ45 LEDs are switch-PHY LEDs (gsw_phyN_ledM in en7528.dtsi), not
- * GPIOs, and the vendor drives them from the MT7530 GPHY LED outputs. The
- * switch driver asks each PHY for its "gbe-led" pinctrl state; when that state
- * is missing it logs
- *   mdio_bus mt7530-0: Failed to setup PHY LED pinctrl
- * once per PHY and leaves the pins undriven - which is why all four LAN LEDs
- * sat lit (active low, floating) before this block existed (observed live,
- * handoff Round 20).
+ * GPIOs, and they need two independent things to work:
  *
- * The groups/functions below are SoC-defined (pinctrl-en7528: phyN_led1 ->
- * gpio 37/35/33/31), so they are the same on this SoC as on the DASAN
- * H660GM-A, whose board file is the reference we mirror here.
+ *   1. the pad must be muxed to the PHY LED function, i.e. the "gbe-led"
+ *      pinctrl state must exist. When it did not, the driver logged
+ *      "Failed to setup PHY LED pinctrl" once per PHY and the active-low pins
+ *      floated, so every LED sat lit.
  *
- * NOT yet verified on this unit: which socket is which GPHY (LAN1..LAN4 are
- * assumed to follow the PHY addresses 9..12 / gsw_phy1..4) and whether the
- * fitted LEDs are the "led1" outputs. Adjust the pinctrl-0 target or the
- * 01_leds mapping in the build after a visual check.
+ *   2. the led@N child of the PHY must be "okay". phylib only walks *available*
+ *      children (of_phy_leds() in drivers/net/phy/phy_device.c), and every leds
+ *      node in en7528.dtsi is "disabled". With them disabled nothing ever
+ *      programs the PHY LED registers, so the LEDs keep their reset state -
+ *      which, now that the pads are muxed, means lit. (CONFIG_PHYLIB_LEDS is
+ *      already =y in target/linux/econet/en7528/config-6.18.)
+ *
+ * fn = LED colour of the led@N classdev: phylib names it
+ * "<mdio dev>:<color>:<function>", e.g. "mt7530-0:09:green:lan". 03_nokia-board
+ * points a netdev trigger at each of those names.
+ *
+ * The EN7528 pinctrl is a crossbar: every LANk pad can show the LED state of
+ * any of the four PHYs (LANk_PHY_LED_MAP(n)). The identity mapping below
+ * (PHY n -> pad n) is a GUESS and is not verified on this unit; if a socket's
+ * LED follows a different socket, swap the pad numbers here.
+ *
+ * gpio30/32/34/36 are the LANk_LED0 pads, gpio31/33/35/37 the LANk_LED1 pads
+ * (pinctrl-en7528, datasheet table 4-12). Both banks are muxed because it is
+ * not known yet which one is fitted in the sockets. Nothing else on this board
+ * uses gpio30..37: the button candidates are 11/16/17/18, USB VBUS is 14 and
+ * the GPIO LED is 16.
  */
 &pinctrl {
+	gswp1_led0_pins: gswp1-led0-pins {
+		mux {
+			function = "phy1_led0";
+			groups = "gpio30";
+		};
+	};
+
 	gswp1_led1_pins: gswp1-led1-pins {
 		mux {
 			function = "phy1_led1";
-			groups = "gpio37";
+			groups = "gpio31";
+		};
+	};
+
+	gswp2_led0_pins: gswp2-led0-pins {
+		mux {
+			function = "phy2_led0";
+			groups = "gpio32";
 		};
 	};
 
 	gswp2_led1_pins: gswp2-led1-pins {
 		mux {
 			function = "phy2_led1";
-			groups = "gpio35";
+			groups = "gpio33";
+		};
+	};
+
+	gswp3_led0_pins: gswp3-led0-pins {
+		mux {
+			function = "phy3_led0";
+			groups = "gpio34";
 		};
 	};
 
 	gswp3_led1_pins: gswp3-led1-pins {
 		mux {
 			function = "phy3_led1";
-			groups = "gpio33";
+			groups = "gpio35";
+		};
+	};
+
+	gswp4_led0_pins: gswp4-led0-pins {
+		mux {
+			function = "phy4_led0";
+			groups = "gpio36";
 		};
 	};
 
 	gswp4_led1_pins: gswp4-led1-pins {
 		mux {
 			function = "phy4_led1";
-			groups = "gpio31";
+			groups = "gpio37";
 		};
 	};
 };
 
 &gsw_phy1 {
 	pinctrl-names = "gbe-led";
-	pinctrl-0 = <&gswp1_led1_pins>;
+	pinctrl-0 = <&gswp1_led0_pins &gswp1_led1_pins>;
 };
 
 &gsw_phy2 {
 	pinctrl-names = "gbe-led";
-	pinctrl-0 = <&gswp2_led1_pins>;
+	pinctrl-0 = <&gswp2_led0_pins &gswp2_led1_pins>;
 };
 
 &gsw_phy3 {
 	pinctrl-names = "gbe-led";
-	pinctrl-0 = <&gswp3_led1_pins>;
+	pinctrl-0 = <&gswp3_led0_pins &gswp3_led1_pins>;
 };
 
 &gsw_phy4 {
 	pinctrl-names = "gbe-led";
-	pinctrl-0 = <&gswp4_led1_pins>;
+	pinctrl-0 = <&gswp4_led0_pins &gswp4_led1_pins>;
 };
+
+/*
+ * led0 = the "link/activity" LED of each socket, led1 = the speed LED, by the
+ * usual MediaTek board convention. Unverified here, and harmless if the wrong
+ * way round: both end up following their PHY's link state.
+ */
+&gsw_phy1_led0 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_GREEN>;
+};
+
+&gsw_phy1_led1 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_AMBER>;
+};
+
+&gsw_phy2_led0 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_GREEN>;
+};
+
+&gsw_phy2_led1 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_AMBER>;
+};
+
+&gsw_phy3_led0 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_GREEN>;
+};
+
+&gsw_phy3_led1 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_AMBER>;
+};
+
+&gsw_phy4_led0 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_GREEN>;
+};
+
+&gsw_phy4_led1 {
+	status = "okay";
+	function = LED_FUNCTION_LAN;
+	color = <LED_COLOR_ID_AMBER>;
+};
+
 
 /* ------------------------------ USB --------------------------------- */
 
