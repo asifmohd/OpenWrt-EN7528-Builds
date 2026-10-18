@@ -1,0 +1,7 @@
+# Docker build context for the OpenWrt firmware image.
+#
+# The upstream OpenWrt checkout is cloned at run time, never copied as build
+# context, so keep it (and any previous output) out of the context.
+openwrt/
+artifacts/
+.git/

@@ -73,3 +73,54 @@ Push to `main` or to the `nokia-g2425g-a` branch, or run the workflow manually
 `v*` tag also creates a release.
 
 The build targets upstream OpenWrt (`openwrt/openwrt`, branch `main`).
+
+## Building locally with Docker
+
+Everything the build needs is baked into `Dockerfile`, so there is no need to
+install the OpenWrt host toolchain on your machine.
+
+```sh
+# From this directory...
+docker compose run --rm --build builder
+
+# ...or from the repository root, via the wrapper:
+../docker-build-firmware.sh
+```
+
+Finished firmware is copied to `artifacts/`
+(`openwrt-econet-en7528-nokia_g2425g-a-initramfs-kernel.bin` and the generic
+image). The first build takes a while (roughly an hour on CI); later builds are
+much faster because the upstream checkout, `dl/`, `build_dir/` and ccache are
+kept in the `openwrt-build` volume.
+
+How it is wired:
+
+* `./` is mounted **read-only** at `/src`; `docker/entrypoint.sh` rsyncs it into
+  `/build/work` and runs `build.sh` there.
+* The upstream OpenWrt tree and all build state live in the named volume
+  `openwrt-build`, i.e. on a case-sensitive Linux filesystem inside the Docker
+  VM. This matters: OpenWrt will not build on a case-insensitive bind mount
+  (the default for a macOS working copy), and a volume is also far faster.
+* `./artifacts` is bind-mounted out so the `.bin` files are easy to grab.
+
+Useful commands:
+
+```sh
+../docker-build-firmware.sh shell     # interactive shell in the build tree
+../docker-build-firmware.sh fresh     # wipe tree, reclone upstream, rebuild
+../docker-build-firmware.sh clean     # remove container + build-volume
+```
+
+Override the upstream source with environment variables:
+
+```sh
+OPENWRT_REF=main OPENWRT_REPO=https://github.com/openwrt/openwrt.git \
+  docker compose run --rm --build builder
+```
+
+Notes:
+
+* On Apple Silicon the image builds natively as arm64 (no emulation); the target
+  is still mipsel. `gcc-multilib` is only installed on amd64.
+* Give Docker plenty of disk (an OpenWrt tree plus toolchain is tens of GB) and
+  several CPUs for a reasonable build time.

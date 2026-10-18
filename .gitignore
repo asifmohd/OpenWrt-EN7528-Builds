@@ -1,1 +1,4 @@
 /openwrt
+/artifacts
+.env
+.DS_Store

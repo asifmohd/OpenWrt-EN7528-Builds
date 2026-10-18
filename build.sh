@@ -6,8 +6,9 @@
 # merged there), with this repository's board files overlaid on top.
 #
 # Environment overrides:
-#   OPENWRT_REPO  git URL to build from   (default: upstream openwrt)
-#   OPENWRT_REF   branch/tag to build     (default: main)
+#   OPENWRT_REPO   git URL to build from   (default: upstream openwrt)
+#   OPENWRT_REF    branch/tag to build     (default: main)
+#   OPENWRT_FRESH  set to 1 to discard an existing ./openwrt checkout and reclone
 #
 set -e
 
@@ -15,8 +16,16 @@ OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
 OPENWRT_REF="${OPENWRT_REF:-main}"
 DEVICE="nokia_g2425g-a"
 
-echo ">>> Cloning $OPENWRT_REPO ($OPENWRT_REF)"
-git clone --depth 1 --branch "$OPENWRT_REF" "$OPENWRT_REPO" openwrt
+# Reuse an existing checkout if one is present. This keeps dl/ and build_dir/
+# (and therefore ccache/toolchain state) across runs, which matters a lot when
+# building inside a container. CI starts with a clean workspace, so it clones.
+if [ -d openwrt/.git ] && [ "${OPENWRT_FRESH:-0}" != "1" ]; then
+	echo ">>> Reusing existing ./openwrt checkout (OPENWRT_FRESH=1 to reclone)"
+else
+	echo ">>> Cloning $OPENWRT_REPO ($OPENWRT_REF)"
+	rm -rf openwrt
+	git clone --depth 1 --branch "$OPENWRT_REF" "$OPENWRT_REPO" openwrt
+fi
 cd openwrt
 
 echo ">>> Adding board support: $DEVICE"
@@ -72,6 +81,12 @@ CONFIG_TARGET_DEVICE_econet_en7528_DEVICE_en7528_generic=y
 CONFIG_TARGET_DEVICE_PACKAGES_econet_en7528_DEVICE_en7528_generic=""
 CONFIG_TARGET_ROOTFS_INITRAMFS=y
 CONFIG_TARGET_INITRAMFS_COMPRESSION_NONE=y
+# ccache. DEVEL only controls the menu visibility of CCACHE; without it the
+# symbol is hidden and `make defconfig` would drop CONFIG_CCACHE again. ccache
+# stores its cache in ./.ccache (i.e. inside openwrt/), so with the Docker
+# named volume it survives across builds and makes rebuilds much faster.
+CONFIG_DEVEL=y
+CONFIG_CCACHE=y
 CONFIG_PACKAGE_kmod-mt76-core=y
 CONFIG_PACKAGE_kmod-mt76-connac=y
 CONFIG_PACKAGE_kmod-mt7603=y
@@ -92,6 +107,13 @@ if ! grep -q "CONFIG_TARGET_DEVICE_econet_en7528_DEVICE_${DEVICE}=y" .config; th
 	echo "ERROR: $DEVICE was not enabled - board files probably failed to apply."
 	grep -i 'CONFIG_TARGET_econet' .config || true
 	exit 1
+fi
+
+echo ">>> Sanity check: is ccache enabled?"
+if grep -q '^CONFIG_CCACHE=y' .config; then
+	echo "    ccache on, cache dir: ${CCACHE_DIR:-./.ccache (relative to openwrt/)}"
+else
+	echo "    WARNING: CONFIG_CCACHE was dropped by defconfig; ccache will not be used."
 fi
 
 echo ">>> make -j$(nproc)  (first build takes roughly an hour)"

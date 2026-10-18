@@ -1,0 +1,50 @@
+# Compile the OpenWrt firmware for the Nokia G-2425G-A with one command:
+#
+#   docker compose run --rm --build builder
+#
+# or, from the parent directory, ./docker-build-firmware.sh
+#
+# The repository itself is bind-mounted read-only at /src; the heavy upstream
+# OpenWrt checkout lives in the named volume `openwrt-build` so it stays on a
+# case-sensitive, fast Linux filesystem and survives between runs. Finished
+# firmware lands in ./artifacts on the host.
+name: openwrt-en7528
+
+services:
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openwrt-en7528-builder:latest
+    working_dir: /build
+    volumes:
+      # The repo under version control (board/, build.sh, ...): read-only.
+      - ./:/src:ro
+      # Persistent build tree (upstream clone + dl/ + build_dir/ + staging).
+      - openwrt-build:/build/work
+      # Where the .bin files are published for the host.
+      - ./artifacts:/build/artifacts
+    environment:
+      OPENWRT_REPO: ${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}
+      OPENWRT_REF: ${OPENWRT_REF:-main}
+      # Set to 1 to reclone upstream / wipe the build tree.
+      OPENWRT_FRESH: ${OPENWRT_FRESH:-0}
+      FRESH_TREE: ${FRESH_TREE:-0}
+
+  # Interactive shell into the same image/tree, for debugging or manual make:
+  #   docker compose run --rm shell
+  shell:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openwrt-en7528-builder:latest
+    working_dir: /build/work
+    entrypoint: ["/bin/bash"]
+    volumes:
+      - ./:/src:ro
+      - openwrt-build:/build/work
+      - ./artifacts:/build/artifacts
+
+volumes:
+  openwrt-build:
