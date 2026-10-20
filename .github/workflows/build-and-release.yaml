@@ -30,8 +30,10 @@ jobs:
         run: |
           DIR=./openwrt/bin/targets/econet/en7528
           NOKIA="$DIR/openwrt-econet-en7528-nokia_g2425g-a-initramfs-kernel.bin"
+          TCLINUX="$DIR/openwrt-econet-en7528-nokia_g2425g-a-tclinux.bin"
           ls -l "$DIR"
           test -f "$NOKIA" || { echo "$NOKIA does not exist"; exit 1; }
+          test -f "$TCLINUX" || { echo "$TCLINUX does not exist"; exit 1; }
           echo "files_exist=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifacts
@@ -48,6 +50,7 @@ jobs:
         with:
           files: |
             ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-nokia_g2425g-a-initramfs-kernel.bin
+            ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-nokia_g2425g-a-tclinux.bin
             ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-en7528_generic-initramfs-kernel.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

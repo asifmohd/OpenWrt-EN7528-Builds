@@ -16,6 +16,9 @@ OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
 OPENWRT_REF="${OPENWRT_REF:-main}"
 DEVICE="nokia_g2425g-a"
 
+# Absolute paths, because the build chdir()s into openwrt/ below.
+B_DIR="$(cd "$(dirname "$0")" && pwd)/board"
+
 # Reuse an existing checkout if one is present. This keeps dl/ and build_dir/
 # (and therefore ccache/toolchain state) across runs, which matters a lot when
 # building inside a container. CI starts with a clean workspace, so it clones.
@@ -34,7 +37,11 @@ cp ../board/en7528_nokia_g2425g-a.dts target/linux/econet/dts/
 # dtc resolves /incbin/ against the DTS directory (-i $(DTS_DIR)), so the
 # blob has to sit next to the .dts.
 cp ../board/nokia-mt7663-eeprom.bin target/linux/econet/dts/
-cat ../board/nokia_g2425g-a.mk >> target/linux/econet/image/en7528.mk
+# The checkout is reused between builds, so guard the append: without this the
+# profile is duplicated in en7528.mk once per run (seen 4x deep in the volume).
+if ! grep -q 'Device/nokia_g2425g-a' target/linux/econet/image/en7528.mk; then
+	cat ../board/nokia_g2425g-a.mk >> target/linux/econet/image/en7528.mk
+fi
 
 # Board defaults that only add keys to /etc/board.json (regulatory country and
 # the LAN socket LED triggers).  Additive on purpose - see the file header.
@@ -68,6 +75,51 @@ if ! grep -q 'nokia,g2425g-a|\\' "$NET_D"; then
 fi
 echo "--- econet_setup_interfaces now reads:"
 sed -n '/^econet_setup_interfaces/,/^}/p' "$NET_D"
+
+echo ">>> Waiting for switch ports before the LED service runs"
+# PHYLIB registers the switch PHY LED classdevs (mt7530-0:09:green:lan, ...)
+# before the DSA user ports they are attached to are registered as netdevs.
+# When /etc/init.d/led activates the "netdev" trigger inside that window, the
+# trigger takes its hw-control path and calls strlen(dev_name(attached_dev));
+# the net_device exists but has no name yet, so strlen(NULL) panics the kernel.
+# Reproduced on the v5 RAM boot:
+#   Comm: led   epc: strlen+0x0   ra: netdev_trig_activate+0x128
+#   lan1 (uninitialized): PHY [mt7530-0:09] ... -> Oops -> Kernel panic
+# v4 only escaped because its boot timing fell outside that window.  Wait for
+# the last switch port before letting the LED service touch any trigger.
+LED_D="package/base-files/files/etc/init.d/led"
+if ! grep -q 'nokia-led-wait' "$LED_D"; then
+	awk '
+		{ print }
+		/^start\(\) \{/ && !added {
+			print "\t# nokia-led-wait: the switch PHY LED classdevs are"
+			print "\t# registered before their DSA netdevs exist.  Activating"
+			print "\t# the netdev trigger in that window dereferences a NULL"
+			print "\t# device name in netdev_trig_activate() -> kernel panic."
+			print "\t_i=0"
+			print "\twhile [ $_i -lt 20 ] && [ ! -e /sys/class/net/lan4 ]; do"
+			print "\t\tsleep 1"
+			print "\t\t_i=$((_i + 1))"
+			print "\tdone"
+			added=1
+		}
+	' "$LED_D" > "$LED_D.new"
+	mv "$LED_D.new" "$LED_D"
+fi
+# The rewrite above loses the executable bit (default umask 022 -> 0644),
+# which makes /etc/init.d/led unrunnable and leaves every trigger at "none".
+# v6 shipped with that bug.  This must run unconditionally: on a second build
+# the file already contains the marker, so the block above is skipped.
+chmod 0755 "$LED_D"
+if ! grep -q 'nokia-led-wait' "$LED_D"; then
+	echo "ERROR: could not patch $LED_D (upstream layout changed?)"
+	sed -n '/^start()/,/^}/p' "$LED_D"
+	exit 1
+fi
+echo "--- led start() now waits for lan4:"
+sed -n '/^start()/,/^}/p' "$LED_D" | sed -n '1,12p'
+# Make sure the changed overlay file is reinstalled into the rootfs.
+touch package/base-files/Makefile
 
 echo ">>> Updating feeds"
 ./scripts/feeds update -a
@@ -151,7 +203,53 @@ for f in *-econet-en7528-*; do
 	mv -f "$f" "openwrt-econet-en7528-${f##*-econet-en7528-}"
 done
 
-sha256sum ./* 2>/dev/null | tee SHA256SUMS || true
+# ---------------------------------------------------------------------------
+# The flashable image: wrap the initramfs kernel in an HDR2 tclinux container
+# with the vendor bootram trailer.  Nothing here is flashed - it only produces
+# the file that `flash` / the bootloader's `httpd` upload page would write.
+#
+# Why the initramfs kernel and not kernel+squashfs yet: this container boots the
+# exact userspace that is already proven from RAM (v8), with no new variables.
+# It needs no rootfs partition, no cmdline and no writable flash, so the only
+# new thing on the first flash test is the container itself.  A kernel+squashfs
+# image is the follow-up; nokia-tclinux.py already takes --rootfs and
+# --pad-kernel-to for it (kernel region padded to 4 MiB so the rootfs lands at
+# a fixed slot offset).
+#
+# Header length must be 0x118 and the trailer must be the stock bootram - see
+# board/nokia-tclinux.py.
+# ---------------------------------------------------------------------------
+echo ">>> Building the flashable HDR2 tclinux container"
+TC_KERNEL="openwrt-econet-en7528-${DEVICE}-initramfs-kernel.bin"
+TC_OUT="openwrt-econet-en7528-${DEVICE}-tclinux.bin"
+TC_REV="$(cat version.buildinfo 2>/dev/null || echo snapshot)"
+TC_LZMA="$PWD/../../../../staging_dir/host/bin/lzma"
+if [ -x "$TC_LZMA" ]; then
+	echo "    using $TC_LZMA (LZMA 4.65, same encoder the vendor image used)"
+	TC_LZMA_ARG="--lzma-tool $TC_LZMA"
+else
+	echo "    WARNING: no host lzma binary, falling back to python liblzma"
+	TC_LZMA_ARG=""
+fi
+# shellcheck disable=SC2086
+python3 "$B_DIR/nokia-tclinux.py" build "$TC_KERNEL" \
+	--trailer "$B_DIR/nokia_bootram.lzma" \
+	--version "OpenWrt-${TC_REV}" \
+	--out "$TC_OUT" $TC_LZMA_ARG
+python3 "$B_DIR/nokia-tclinux.py" verify "$TC_OUT"
+
+# Checksums must be written *after* the container exists, or the entry is stale.
+# OpenWrt's own `sha256sums` is generated by `make` - i.e. before this container
+# is assembled, and, in a reused build tree, it can even list the previous run's
+# container.  Drop both names first: the glob below is expanded before the
+# redirection creates the new file, so a leftover SHA256SUMS would otherwise be
+# hashed (and then truncated), leaving a bad line in the file.
+rm -f sha256sums SHA256SUMS .sha256sums.tmp
+find . -maxdepth 1 -type f ! -name 'SHA256SUMS' ! -name '.sha256sums.tmp' -print0 \
+	| sort -z | xargs -0 sha256sum > .sha256sums.tmp
+mv -f .sha256sums.tmp SHA256SUMS
+sha256sum -c SHA256SUMS >/dev/null 2>&1 && echo "    SHA256SUMS verified" \
+	|| { echo "ERROR: SHA256SUMS did not verify" >&2; exit 1; }
 ls -l
 
 echo ">>> Done"
