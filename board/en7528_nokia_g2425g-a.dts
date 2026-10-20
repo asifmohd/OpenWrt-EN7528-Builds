@@ -346,51 +346,70 @@
  * led0 = the "link/activity" LED of each socket, led1 = the speed LED, by the
  * usual MediaTek board convention. Unverified here, and harmless if the wrong
  * way round: both end up following their PHY's link state.
+ *
+ * "active-low" is REQUIRED on this board and was the fix for the inverted LED
+ * behaviour seen on the v4 image (idle = lit, link up = dark).  It is set from
+ * the observed reset state: with the pads muxed, the LED block powers up with
+ * its registers cleared and all four sockets lit with no cable, i.e. the fitted
+ * LEDs are common-anode and the PHY pin sinks current to light them.  The
+ * driver's default polarity is active-high, so the netdev trigger's "off"
+ * (link down) drove the pin low -> lit, and "on" (link up) drove it high ->
+ * dark.  "active-low" makes of_phy_led() call an7581_phy_led_polarity_set()
+ * with PHY_LED_ACTIVE_LOW, which sets MTK_PHY_LED_ON_POLARITY (BIT 14) in the
+ * per-LED ON_CTRL register (mtk-ge-soc.c), so "on" now means pin low = lit.
  */
 &gsw_phy1_led0 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_GREEN>;
 };
 
 &gsw_phy1_led1 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_AMBER>;
 };
 
 &gsw_phy2_led0 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_GREEN>;
 };
 
 &gsw_phy2_led1 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_AMBER>;
 };
 
 &gsw_phy3_led0 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_GREEN>;
 };
 
 &gsw_phy3_led1 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_AMBER>;
 };
 
 &gsw_phy4_led0 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_GREEN>;
 };
 
 &gsw_phy4_led1 {
 	status = "okay";
+	active-low;
 	function = LED_FUNCTION_LAN;
 	color = <LED_COLOR_ID_AMBER>;
 };
