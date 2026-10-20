@@ -1,6 +1,13 @@
 #!/bin/sh
 # Build an OpenWrt RAM-only (initramfs) image for the Nokia G-2425G-A
-# (Airtel XStream Fiber) EN7528 ONT.
+# (Airtel XStream Fiber) EN7528 ONT, plus the HDR2 tclinux container that the
+# TcBoot bootloader can load from flash.
+#
+# Two devices are built from the same kernel: the RAM profile (every partition
+# read-only, the image that has been proven over UART) and the flash profile
+# (identical except that flag/flagback are writable, so OpenWrt can keep the
+# bootloader's boot_fail_num counter clear). Only the flash profile's container
+# may ever be written to NAND - see the tail of this script.
 #
 # The build is done against upstream OpenWrt (the econet/en7528 target is
 # merged there), with this repository's board files overlaid on top.
@@ -15,6 +22,9 @@ set -e
 OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
 OPENWRT_REF="${OPENWRT_REF:-main}"
 DEVICE="nokia_g2425g-a"
+# Two devices, one kernel, two device trees: the RAM profile (every partition
+# read-only) and the flash profile (flag/flagback writable + nokia-flagreset).
+DEVICES="nokia_g2425g-a nokia_g2425g-a-flash"
 
 # Absolute paths, because the build chdir()s into openwrt/ below.
 B_DIR="$(cd "$(dirname "$0")" && pwd)/board"
@@ -31,16 +41,58 @@ else
 fi
 cd openwrt
 
-echo ">>> Adding board support: $DEVICE"
+echo ">>> Adding board support: $DEVICE (+ the flash profile)"
 cp ../board/en7528_nokia_g2425g-a.dts target/linux/econet/dts/
+cp ../board/en7528_nokia_g2425g-a-flash.dts target/linux/econet/dts/
 # 5 GHz calibration, embedded into the DTB via /incbin/ on &slot1.
 # dtc resolves /incbin/ against the DTS directory (-i $(DTS_DIR)), so the
 # blob has to sit next to the .dts.
 cp ../board/nokia-mt7663-eeprom.bin target/linux/econet/dts/
-# The checkout is reused between builds, so guard the append: without this the
-# profile is duplicated in en7528.mk once per run (seen 4x deep in the volume).
-if ! grep -q 'Device/nokia_g2425g-a' target/linux/econet/image/en7528.mk; then
-	cat ../board/nokia_g2425g-a.mk >> target/linux/econet/image/en7528.mk
+# The checkout is reused between builds, so the profile block is regenerated
+# from board/nokia_g2425g-a.mk on every run: drop whatever an earlier run left
+# behind (the sentinel-delimited block, or the pre-sentinel block that older
+# trees carry) and append the current one. Without this the profile is
+# duplicated once per run (seen 4x deep in the volume), and a device added later
+# - like the flash profile - would never be picked up at all.
+EMK=target/linux/econet/image/en7528.mk
+awk '
+	/# >>> nokia_g2425g-a/ { skip = 1 }
+	skip && /# <<< nokia_g2425g-a/ { skip = 0; next }
+	skip { next }
+	$0 == "# Nokia G-2425G-A (Airtel XStream Fiber)" { legacy = 1 }
+	legacy { if ($0 ~ /^TARGET_DEVICES \+= nokia_g2425g-a$/) legacy = 0; next }
+	{ print }
+' "$EMK" > "$EMK.new"
+mv "$EMK.new" "$EMK"
+cat ../board/nokia_g2425g-a.mk >> "$EMK"
+for d in $DEVICES; do
+	if [ "$(grep -c "^define Device/${d}\$" "$EMK")" != 1 ]; then
+		echo "ERROR: $d is not defined exactly once in $EMK" >&2
+		grep -n 'define Device/' "$EMK" >&2
+		exit 1
+	fi
+done
+
+# nokia-flagreset: keeps the bootloader's boot_fail_num below the failover
+# point. Only the flash profile's DEVICE_PACKAGES pulls it in, so the RAM image
+# does not ship it (and could not use it anyway - every MTD is read-only there).
+echo ">>> Adding the nokia-flagreset package (flash profile only)"
+rm -rf package/nokia-flagreset
+mkdir -p package/nokia-flagreset
+cp ../board/nokia-flagreset/Makefile package/nokia-flagreset/
+cp -R ../board/nokia-flagreset/files package/nokia-flagreset/
+chmod 0755 package/nokia-flagreset/files/nokia-flagreset.init
+# Off-device check of the reset logic (fake /proc/mtd + fake mtd). Skipped where
+# hexdump is unavailable (the script itself needs busybox hexdump *on the
+# device*, where it is always present).
+if [ -f "$B_DIR/nokia-flagreset/selftest.sh" ] && command -v hexdump >/dev/null 2>&1; then
+	if sh "$B_DIR/nokia-flagreset/selftest.sh" >/dev/null; then
+		echo "    nokia-flagreset selftest passed"
+	else
+		echo "ERROR: nokia-flagreset selftest failed" >&2
+		sh "$B_DIR/nokia-flagreset/selftest.sh" >&2 || true
+		exit 1
+	fi
 fi
 
 # Board defaults that only add keys to /etc/board.json (regulatory country and
@@ -135,6 +187,8 @@ CONFIG_TARGET_MULTI_PROFILE=y
 CONFIG_TARGET_PER_DEVICE_ROOTFS=y
 CONFIG_TARGET_DEVICE_econet_en7528_DEVICE_nokia_g2425g-a=y
 CONFIG_TARGET_DEVICE_PACKAGES_econet_en7528_DEVICE_nokia_g2425g-a=""
+CONFIG_TARGET_DEVICE_econet_en7528_DEVICE_nokia_g2425g-a-flash=y
+CONFIG_TARGET_DEVICE_PACKAGES_econet_en7528_DEVICE_nokia_g2425g-a-flash=""
 CONFIG_TARGET_DEVICE_econet_en7528_DEVICE_en7528_generic=y
 CONFIG_TARGET_DEVICE_PACKAGES_econet_en7528_DEVICE_en7528_generic=""
 CONFIG_TARGET_ROOTFS_INITRAMFS=y
@@ -167,12 +221,16 @@ EOF
 echo ">>> make defconfig"
 make defconfig
 
-echo ">>> Sanity check: is $DEVICE enabled?"
-if ! grep -q "CONFIG_TARGET_DEVICE_econet_en7528_DEVICE_${DEVICE}=y" .config; then
-	echo "ERROR: $DEVICE was not enabled - board files probably failed to apply."
-	grep -i 'CONFIG_TARGET_econet' .config || true
-	exit 1
-fi
+echo ">>> Sanity check: are the devices enabled?"
+for d in $DEVICES; do
+	if grep -q "CONFIG_TARGET_DEVICE_econet_en7528_DEVICE_${d}=y" .config; then
+		echo "    $d"
+	else
+		echo "ERROR: $d was not enabled - board files probably failed to apply."
+		grep -i 'CONFIG_TARGET_econet' .config || true
+		exit 1
+	fi
+done
 
 echo ">>> Sanity check: is ccache enabled?"
 if grep -q '^CONFIG_CCACHE=y' .config; then
@@ -210,18 +268,19 @@ done
 #
 # Why the initramfs kernel and not kernel+squashfs yet: this container boots the
 # exact userspace that is already proven from RAM (v8), with no new variables.
-# It needs no rootfs partition, no cmdline and no writable flash, so the only
-# new thing on the first flash test is the container itself.  A kernel+squashfs
-# image is the follow-up; nokia-tclinux.py already takes --rootfs and
-# --pad-kernel-to for it (kernel region padded to 4 MiB so the rootfs lands at
-# a fixed slot offset).
+# It needs no rootfs partition, no cmdline, so the only new thing on the first
+# flash test is the container itself.  A kernel+squashfs image is the follow-up;
+# nokia-tclinux.py already takes --rootfs and --pad-kernel-to for it (kernel
+# region padded to 4 MiB so the rootfs lands at a fixed slot offset).
 #
 # Header length must be 0x118 and the trailer must be the stock bootram - see
 # board/nokia-tclinux.py.
+#
+# One container per profile, because the DTB is the difference: the flash
+# profile's kernel is the one whose flag/flagback are writable, and the only one
+# that may ever be written to NAND.  The DTB is checked in the shipped file with
+# board/nokia-verify-dtb.py, so "the right tree got in" is asserted, not assumed.
 # ---------------------------------------------------------------------------
-echo ">>> Building the flashable HDR2 tclinux container"
-TC_KERNEL="openwrt-econet-en7528-${DEVICE}-initramfs-kernel.bin"
-TC_OUT="openwrt-econet-en7528-${DEVICE}-tclinux.bin"
 TC_REV="$(cat version.buildinfo 2>/dev/null || echo snapshot)"
 TC_LZMA="$PWD/../../../../staging_dir/host/bin/lzma"
 if [ -x "$TC_LZMA" ]; then
@@ -231,12 +290,30 @@ else
 	echo "    WARNING: no host lzma binary, falling back to python liblzma"
 	TC_LZMA_ARG=""
 fi
-# shellcheck disable=SC2086
-python3 "$B_DIR/nokia-tclinux.py" build "$TC_KERNEL" \
-	--trailer "$B_DIR/nokia_bootram.lzma" \
-	--version "OpenWrt-${TC_REV}" \
-	--out "$TC_OUT" $TC_LZMA_ARG
-python3 "$B_DIR/nokia-tclinux.py" verify "$TC_OUT"
+for d in $DEVICES; do
+	echo ">>> Building the flashable HDR2 tclinux container ($d)"
+	TC_KERNEL="openwrt-econet-en7528-${d}-initramfs-kernel.bin"
+	TC_OUT="openwrt-econet-en7528-${d}-tclinux.bin"
+	case "$d" in
+	nokia_g2425g-a)
+		DTB_ARGS="--read-only 15" ;;
+	nokia_g2425g-a-flash)
+		DTB_ARGS="--read-only 13 --writable flag,flagback" ;;
+	*)
+		DTB_ARGS="" ;;
+	esac
+	if [ -n "$DTB_ARGS" ]; then
+		# shellcheck disable=SC2086
+		python3 "$B_DIR/nokia-verify-dtb.py" "$TC_KERNEL" \
+			--compatible nokia,g2425g-a $DTB_ARGS
+	fi
+	# shellcheck disable=SC2086
+	python3 "$B_DIR/nokia-tclinux.py" build "$TC_KERNEL" \
+		--trailer "$B_DIR/nokia_bootram.lzma" \
+		--version "OpenWrt-${TC_REV}" \
+		--out "$TC_OUT" $TC_LZMA_ARG
+	python3 "$B_DIR/nokia-tclinux.py" verify "$TC_OUT"
+done
 
 # Checksums must be written *after* the container exists, or the entry is stale.
 # OpenWrt's own `sha256sums` is generated by `make` - i.e. before this container
@@ -253,3 +330,9 @@ sha256sum -c SHA256SUMS >/dev/null 2>&1 && echo "    SHA256SUMS verified" \
 ls -l
 
 echo ">>> Done"
+echo
+echo "    RAM profile    : openwrt-econet-en7528-nokia_g2425g-a-tclinux.bin"
+echo "                     (every partition read-only; never write it to NAND)"
+echo "    FLASH profile  : openwrt-econet-en7528-nokia_g2425g-a-flash-tclinux.bin"
+echo "                     (the only image that may be flashed; see"
+echo "                      FLASH_INSTALL_RUNBOOK.md in the parent repository)"

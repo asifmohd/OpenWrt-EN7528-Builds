@@ -1,0 +1,53 @@
+/*
+ * Nokia G-2425G-A (Airtel XStream Fiber) - FLASH profile
+ *
+ * Identical to en7528_nokia_g2425g-a.dts (the RAM profile) except that the two
+ * boot-flag partitions are writable. That is the whole difference: 13 of the 15
+ * partitions stay read-only, including bootloader, both A/B slots and the
+ * vendor config/log/data UBIFS.
+ *
+ * Why: the TcBoot stage-2 increments flag.boot_fail_num on every start and, on
+ * the 9th, permanently fails over to the other slot. The vendor userspace clears
+ * the counter on every boot ("reset boot_fail_num = 0 done"); an initramfs
+ * OpenWrt has no such thing, so without a writable flag block a flashed install
+ * would silently walk back to the stock image after 9 reboots. See FLASH_IMAGE.md
+ * and FLAG_DECODE.md.
+ *
+ * What is deliberately NOT here (both belong to a kernel+squashfs install, which
+ * this image is not):
+ *   - "linux,rootfs" on the rootfs partition,
+ *   - a chosen/bootargs "root=".
+ * The flashable container carries the initramfs kernel (rootfs_len = 0), so it
+ * needs no rootfs partition at all. Adding either of the above to an initramfs
+ * boot would point the kernel at the vendor squashfs - the opposite of the
+ * intent.
+ *
+ * Kept as an overlay on purpose: the RAM profile stays the single source of
+ * truth, so the two can not drift. Verified to compile with
+ *   clang -E -x assembler-with-cpp -D__DTS__ -nostdinc -I . -I inc
+ *   dtc -I dts -O dtb
+ * and the resulting DTB has read-only on 13 partitions and no read-only on
+ * "flag"/"flagback".
+ */
+
+/dts-v1/;
+
+#include "en7528_nokia_g2425g-a.dts"
+
+&partitions {
+	/*
+	 * The bootloader's slot state: commit / next_active / image{0,1}_is_valid
+	 * / boot_fail_num / active, 0x38 bytes at offset 0, no CRC. Only the
+	 * first 0x38 bytes of each 256 KiB partition are ever read; the rest is
+	 * already 0xFF on this unit, which is why erasing the partition to
+	 * rewrite the struct loses nothing (the two 16-char version strings were
+	 * wiped to 0xFF by the first bootloader write long ago).
+	 */
+	partition@6dc0000 {
+		/delete-property/ read-only;
+	};
+
+	partition@6e00000 {
+		/delete-property/ read-only;
+	};
+};

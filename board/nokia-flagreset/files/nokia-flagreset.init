@@ -1,0 +1,155 @@
+#!/bin/sh /etc/rc.common
+#
+# nokia-flagreset - keep the TcBoot boot_fail_num counter from reaching 9.
+#
+# The TcBoot stage-2 bootloader rewrites the `flag` and `flagback` partitions on
+# every start:
+#
+#     0x00 commit            0x04 next_active        0x08 image0_is_valid
+#     0x0c image1_is_valid   0x10 boot_fail_num      0x14 active
+#     0x18 image0_version[16]                        0x28 image1_version[16]
+#
+# It increments boot_fail_num on each start and, on the 9th, flips next_active to
+# the other A/B slot, marks the current slot invalid, clears the counter and
+# boots the other slot. The vendor userspace prevents that by clearing the
+# counter at boot ("reset boot_fail_num = 0 done" in its own log); an initramfs
+# OpenWrt has nothing that does, so a flashed install would silently walk back
+# to the stock image after nine reboots.
+#
+# This script does exactly one thing: if boot_fail_num has climbed to RESET_AT
+# or beyond, it rewrites the counter to 0 in both copies. Nothing else in the
+# block is modified, and nothing is written if the block does not look like the
+# layout above - a wrong guess here could make the bootloader distrust both
+# slots, which is much worse than an unconsumed counter.
+#
+# Why RESET_AT=4 and not 1: each reset is an erase+program of a NAND block, and
+# a power cut inside it leaves that copy blank. Resetting only when the counter
+# reaches 4 means four boots' worth of writes instead of every boot, while
+# leaving five boots of failover headroom (the bootloader trips at 9). The
+# counter is rewritten in place, so a reset at 4 is invisible: the next boot
+# just increments 0 -> 1 as usual.
+#
+# Requires the flash-profile device tree (en7528_nokia_g2425g-a-flash.dts),
+# where "flag"/"flagback" are the only writable partitions; in the RAM profile
+# every partition is read-only and `mtd write` would fail with EROFS. The
+# nokia-flagreset package is only in the flash profile's DEVICE_PACKAGES.
+#
+# Field layout, code addresses and the live diff: FLAG_DECODE.md.
+
+START=10
+
+# Reset once the counter has reached this value. Must stay well below 9.
+RESET_AT=4
+
+# Overridable so the logic can be exercised off-device (see selftest.sh).
+PROC_MTD="${PROC_MTD:-/proc/mtd}"
+DEV_DIR="${DEV_DIR:-/dev}"
+MTD_BIN="${MTD_BIN:-mtd}"
+
+FLAG_PART=flag
+FLAGBACK_PART=flagback
+BLOCK_LEN=56
+
+TMP="${TMPDIR:-/tmp}/.nokia-flag.$$"
+
+log() {
+	"${LOGGER_BIN:-logger}" -t nokia-flagreset "$@" 2>/dev/null || true
+	echo "nokia-flagreset: $*"
+}
+
+# Leave the flash completely alone, but say why.
+bail() {
+	log "$* -- boot flag block left untouched"
+	rm -f "$TMP"
+	exit 0
+}
+
+# Index of an MTD partition from its label: "mtd10: 00040000 00020000 \"flag\"".
+mtd_index() {
+	awk -v want="$1" '$4 == "\"" want "\"" { sub(/:$/, "", $1); print substr($1, 4); exit }' \
+		"$PROC_MTD"
+}
+
+# The 4 bytes at $2 as 8 lowercase hex chars, in memory (little-endian) order.
+field() {
+	hexdump -v -s "$2" -n 4 -e '4/1 "%02x"' "$1"
+}
+
+start() {
+	[ -r "$PROC_MTD" ] || bail "no $PROC_MTD"
+
+	n=$(mtd_index "$FLAG_PART")
+	[ -n "$n" ] || bail "no \"$FLAG_PART\" partition"
+	nb=$(mtd_index "$FLAGBACK_PART")
+	[ -n "$nb" ] || bail "no \"$FLAGBACK_PART\" partition"
+
+	# Prefer the read-only node: this is a write-only-when-necessary script, so
+	# the read half should not even have write permission.
+	dev=""
+	for c in "$DEV_DIR/mtd${n}ro" "$DEV_DIR/mtd${n}" "$DEV_DIR/mtdblock${n}"; do
+		if [ -r "$c" ]; then
+			dev="$c"
+			break
+		fi
+	done
+	[ -n "$dev" ] || bail "no readable device node for mtd$n ($FLAG_PART)"
+
+	if ! dd if="$dev" of="$TMP" bs=$BLOCK_LEN count=1 2>/dev/null; then
+		bail "read from $dev failed"
+	fi
+	[ "$(wc -c < "$TMP" | tr -d ' ')" = "$BLOCK_LEN" ] || bail "short read from $dev"
+
+	# --- sanity: is this really the boot flag block? -----------------------
+	commit=$(field "$TMP" 0)
+	next_active=$(field "$TMP" 4)
+	image0=$(field "$TMP" 8)
+	image1=$(field "$TMP" 12)
+	bfn=$(field "$TMP" 16)
+	active=$(field "$TMP" 20)
+
+	case "$commit" in 00000000 | 01000000) ;; *) bail "commit=0x$commit out of range" ;; esac
+	case "$next_active" in 00000000 | 01000000 | 02000000) ;;
+	*) bail "next_active=0x$next_active out of range" ;;
+	esac
+	case "$image0" in 00000000 | 01000000) ;; *) bail "image0_is_valid=0x$image0 out of range" ;; esac
+	case "$image1" in 00000000 | 01000000) ;; *) bail "image1_is_valid=0x$image1 out of range" ;; esac
+	case "$active" in 00000000 | 01000000 | 02000000) ;;
+	*) bail "active=0x$active out of range" ;;
+	esac
+	# boot_fail_num is a small little-endian counter; anything else means the
+	# block is not what this script thinks it is. ("case" sees the bytes in
+	# memory order, so the counter is the *first* pair of hex digits.)
+	case "$bfn" in [0-9a-f][0-9a-f]000000) ;; *) bail "boot_fail_num=0x$bfn is not a small counter" ;; esac
+
+	val=$((0x${bfn%??????}))
+	if [ "$val" -lt "$RESET_AT" ]; then
+		log "boot_fail_num=$val, below $RESET_AT -- nothing to do"
+		rm -f "$TMP"
+		exit 0
+	fi
+
+	# --- rewrite only boot_fail_num --------------------------------------
+	if ! dd if=/dev/zero of="$TMP" bs=1 seek=16 count=4 conv=notrunc 2>/dev/null; then
+		bail "could not patch the in-memory copy"
+	fi
+	[ "$(field "$TMP" 16)" = 00000000 ] || bail "in-memory patch did not take"
+
+	log "boot_fail_num=$val -> 0 (commit=$commit next_active=$next_active active=$active image0_is_valid=$image0 image1_is_valid=$image1)"
+
+	# `flag` first: it is the primary copy the stage-2 reads, so the fresh copy
+	# is in place before the fallback is touched. Both stay a valid struct for
+	# the whole operation except the few ms each erase takes.
+	if "$MTD_BIN" write "$TMP" "$FLAG_PART"; then
+		log "$FLAG_PART: boot_fail_num=0 written"
+	else
+		bail "mtd write to $FLAG_PART failed"
+	fi
+
+	if "$MTD_BIN" write "$TMP" "$FLAGBACK_PART"; then
+		log "$FLAGBACK_PART: boot_fail_num=0 written"
+	else
+		log "WARNING: mtd write to $FLAGBACK_PART failed -- $FLAG_PART is already correct"
+	fi
+
+	rm -f "$TMP"
+}
