@@ -3,15 +3,21 @@ name: Build and Release
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]  # This will trigger on tags starting with 'v'
+    tags: [ 'v*' ]
+  workflow_dispatch: {}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/.ghcup "$AGENT_TOOLSDIRECTORY" || true
+        sudo apt-get clean || true
+        df -h /
 
     - name: Make build.sh executable
       run: chmod +x ./build.sh
@@ -19,37 +25,24 @@ jobs:
     - name: Run build script
       run: ./build.sh
 
-    - name: Check if output files exist
-      id: check_files
+    - name: List build outputs
+      if: always()
       run: |
-        FILES=(
-          "./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-dasan_h660gm-a-squashfs-tclinux.trx"
-          "./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-en7528_generic-initramfs-kernel.bin"
-        )
-        ALL_EXIST=true
-        for FILE in "${FILES[@]}"; do
-          if [ -f "$FILE" ]; then
-            echo "$FILE exists"
-          else
-            echo "$FILE does not exist"
-            ALL_EXIST=false
-          fi
-        done
-        if [ "$ALL_EXIST" = "true" ]; then
-          echo "All files exist"
-          echo "files_exist=true" >> $GITHUB_OUTPUT
-        else
-          echo "One or more files missing"
-          echo "files_exist=false" >> $GITHUB_OUTPUT
-          exit 1
-        fi
+        echo "=== bin/targets tree ==="
+        find ./openwrt/bin/targets -maxdepth 4 -type f 2>/dev/null | sort || echo "no bin/targets"
 
-    - name: Create Release and Upload Assets
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && steps.check_files.outputs.files_exist == 'true'
-      uses: softprops/action-gh-release@v2
+    - name: Upload images as artifact
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
-        files: |
-          ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-dasan_h660gm-a-squashfs-tclinux.trx
-          ./openwrt/bin/targets/econet/en7528/openwrt-econet-en7528-en7528_generic-initramfs-kernel.bin
-      env:
-        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        name: openwrt-en7528-images
+        if-no-files-found: warn
+        retention-days: 30
+        path: |
+          ./openwrt/bin/targets/econet/en7528/*.trx
+          ./openwrt/bin/targets/econet/en7528/*.bin
+          ./openwrt/bin/targets/econet/en7528/*.itb
+          ./openwrt/bin/targets/econet/en7528/*sysupgrade*
+          ./openwrt/bin/targets/econet/en7528/*factory*
+          ./openwrt/bin/targets/econet/en7528/sha256sums
+          ./openwrt/bin/targets/econet/en7528/config.buildinfo
